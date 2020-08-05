@@ -1,0 +1,986 @@
+---
+title: "China Info Ops Dissertation"
+author: "Candidate 44406"
+editor_options: 
+  chunk_output_type: console
+---
+
+## Load Packages
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(quanteda)
+library(quanteda.dictionaries)
+library(readr)
+library(textmineR)
+library(translateR)
+```
+
+## Data Import (chinatweets 1-5 = corpus 1, chinatweets 6 = corpus 2)
+
+```{r}
+# Import dataframes
+chinatweets1 <- read_csv("china_082019_1_tweets_csv_hashed.csv", na = character())
+chinatweets2 <- read_csv("china_082019_2_tweets_csv_hashed.csv", na = character())
+chinatweets3 <- read_csv("china_082019_3_tweets_csv_hashed_part1.csv", na = character())
+chinatweets4 <- read_csv("china_082019_3_tweets_csv_hashed_part2.csv", na = character())
+chinatweets5 <- read_csv("china_082019_3_tweets_csv_hashed_part3.csv", na = character())
+chinatweets6 <- read_csv("china_052020_tweets_csv_hashed.csv", na = character())
+
+# Combine and clear memory
+chinatweets <- rbind(chinatweets1, chinatweets2, chinatweets3, chinatweets4, chinatweets5, make.row.names = FALSE)
+rm(chinatweets1, chinatweets2, chinatweets3, chinatweets4, chinatweets5)
+```
+
+## Determination of State-Backed Actor Attribution Dates (for filtration)
+
+```{r}
+# Get total number of languages (66)
+lang <- unique(c(unique(chinatweets$tweet_language), unique(chinatweets6$tweet_language)))
+length(lang)
+
+# Density plot (corpus 1)
+# Keep only top four defined languages
+sort(table(chinatweets$tweet_language), decreasing = TRUE)
+chinatweets$tweet_language <- gsub("in", "id", chinatweets$tweet_language) # Unify Bahasa code
+chinatweets <- rbind(chinatweets[which(chinatweets$tweet_language == "id"), ], 
+                     chinatweets[which(chinatweets$tweet_language == "en"), ], 
+                     chinatweets[which(chinatweets$tweet_language == "zh"), ], 
+                     chinatweets[which(chinatweets$tweet_language == "ar"), ], make.row.names = FALSE)
+colnames(chinatweets)[12] <- "Language"
+chinatweets$tweet_time <- as.Date(chinatweets$tweet_time)
+ggplot(chinatweets, aes(x = tweet_time, color = Language)) +
+  geom_density() +
+  labs(x = "Time", y = "Density") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+
+# Keep Chinese, English, and Arabic tweets from July 2017 on
+
+# Density plot (corpus 2)
+# Keep only top four defined languages
+sort(table(chinatweets6$tweet_language), decreasing = TRUE)
+chinatweets6 <- rbind(chinatweets6[which(chinatweets6$tweet_language == "zh"), ],
+                      chinatweets6[which(chinatweets6$tweet_language == "en"), ],
+                      chinatweets6[which(chinatweets6$tweet_language == "ja"), ],
+                      chinatweets6[which(chinatweets6$tweet_language == "ru"), ],
+                      make.row.names = FALSE)
+colnames(chinatweets6)[12] <- "Language"
+chinatweets6$tweet_time <- as.Date(chinatweets6$tweet_time)
+ggplot(chinatweets6, aes(x = tweet_time, color = Language)) +
+  geom_density() +
+  labs(x = "Time", y = "Density") +
+  scale_x_date(date_labels = "%Y (%b)")
+
+# Keep Chinese, English, and Japanese from January 2019 on
+```
+
+## Data Filtration and Cleaning
+
+```{r}
+# Keep only English, Chinese, and Arabic tweets (corpus 1)
+chinatweets <- filter(chinatweets, Language == "zh" | Language == "en" | Language == "ar")
+
+# Keep only tweets after June 30, 2017 (corpus 1)
+chinatweets <- chinatweets[which(chinatweets$tweet_time > "2017-06-30"), ]
+
+# Remove "poll choices" variable - only in corpus 1
+chinatweets <- select(chinatweets, -poll_choices)
+
+# Keep only Chinese, English, and Japanese tweets (corpus 2)
+chinatweets6 <- filter(chinatweets6, Language == "zh" | Language == "en" | Language == "ja")
+
+# Keep only tweets after Dec 31, 2018 (corpus 2)
+chinatweets6 <- chinatweets6[which(chinatweets6$tweet_time > "2018-12-31"), ]
+
+# Combine corpus 1 and 2
+chinatweets <- rbind(chinatweets, chinatweets6, make.row.names = FALSE)
+rm(chinatweets6)
+
+# Remove unnecessary variables
+chinatweets <- select(chinatweets, -user_profile_url, -in_reply_to_userid, -in_reply_to_tweetid, -quoted_tweet_tweetid, -retweet_userid, -retweet_tweetid, -latitude, -longitude, -urls, -user_mentions)
+
+# Examine random sample
+chinatweets[sample(nrow(chinatweets), 10), "tweet_text"]
+chinatweets[100:110, "tweet_text"]
+
+# Clean corpus
+chinatweets$tweet_text <- gsub("(f|ht)tp\\S+\\s*", "", chinatweets$tweet_text) # remove urls
+chinatweets$tweet_text <- gsub("[p][i][c][.][^[:space:]]+", "", chinatweets$tweet_text) # remove image links
+chinatweets$tweet_text <- tolower(chinatweets$tweet_text) # lower case
+chinatweets$tweet_text <- gsub("^ ", "", chinatweets$tweet_text) # remove space at beginning
+chinatweets$tweet_text <- gsub(" $", "", chinatweets$tweet_text) # remove space at end
+chinatweets <- subset(chinatweets, !nchar(as.character(chinatweets$tweet_text)) < 6) # remove tweets less than 6 characters
+
+# Separate chinatweets into English, Chinese, Arabic, and Japanese corpuses
+chinatweets_zh <- chinatweets[which(chinatweets$Language == "zh"), ]
+chinatweets_en <- chinatweets[which(chinatweets$Language == "en"), ]
+chinatweets_ar <- chinatweets[which(chinatweets$Language == "ar"), ]
+chinatweets_ja <- chinatweets[which(chinatweets$Language == "ja"), ]
+```
+
+
+## Determine K for Topic Modeling (Number of Topics for Each 'Language Corpus')
+
+```{r}
+# Chinese corpus
+# Create 10% random sample to be able to run five models and compare topic coherence
+chinatweets_zh_sample <- sample_n(chinatweets_zh, (nrow(chinatweets_zh)*.10))
+chinatweets_zh_sample_corp <- corpus(chinatweets_zh_sample, text_field = "tweet_text")
+
+# Create DFM (remove stopwords+, numbers, punctuation, and separators)
+to_remove_zh <- c(stopwords("zh", source = "misc"), "t.co", "http", "https",
+                  "rt", "p", "amp", "via", "=")
+chinatweets_zh_sample_dfm <- dfm(chinatweets_zh_sample_corp, remove = to_remove_zh, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_zh_sample_dfm <- dfm_trim(chinatweets_zh_sample_dfm, min_termfreq = 3) # Set min term and doc frequency
+chinatweets_zh_sample_dfm <- dfm_subset(chinatweets_zh_sample_dfm, ntoken(chinatweets_zh_sample_dfm) > 0) # Keep only tweets with features
+chinatweets_zh_sample_mat <- as(chinatweets_zh_sample_dfm, "dgCMatrix") # Convert to dgCMatrix
+
+# Create five models to compare
+set.seed(123)
+k_list <- seq(10, 50, by = 10)
+model_list <- TmParallelApply(X = k_list, FUN = function(k){
+  m <- FitLdaModel(dtm = chinatweets_zh_sample_mat, 
+                     k = k,
+                     iterations = 200,
+                     burnin = 50,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE) 
+  m$k <- k
+  m
+}, export = ls())
+
+# Compare coherence for the five Chinese models (for reference: https://cran.r-project.org/web/packages/textmineR/vignettes/c_topic_modeling.html)
+coherence_mat <- data.frame(k = sapply(model_list, function(x) nrow(x$phi)), 
+                            coherence = sapply(model_list, function(x) mean(x$coherence)), 
+                            stringsAsFactors = FALSE)
+plot(coherence_mat, type = "o")
+
+# English (repeat process from above)
+# Create sample corpus and DFM
+chinatweets_en_sample <- sample_n(chinatweets_en, (nrow(chinatweets_en)*.10))
+chinatweets_en_sample_corp <- corpus(chinatweets_en_sample, text_field = "tweet_text")
+
+# Create DFM (remove stopwords+, numbers, punctuation, and separators)
+to_remove_en <- c(stopwords("english"), "t.co", "http", "https",
+                  "rt", "p", "amp", "via", "=")
+chinatweets_en_sample_dfm <- dfm(chinatweets_en_sample_corp, remove = to_remove_en, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_en_sample_dfm <- dfm_trim(chinatweets_en_sample_dfm, min_termfreq = 3) # Set min term and doc frequency
+chinatweets_en_sample_dfm <- dfm_subset(chinatweets_en_sample_dfm, ntoken(chinatweets_en_sample_dfm) > 0) # Keep only tweets with features
+chinatweets_en_sample_mat <- as(chinatweets_en_sample_dfm, "dgCMatrix") # Convert to dgCMatrix
+
+# Create five models to compare
+set.seed(123)
+model_list <- TmParallelApply(X = k_list, FUN = function(k){
+  m <- FitLdaModel(dtm = chinatweets_en_sample_mat, 
+                     k = k,
+                     iterations = 200,
+                     burnin = 50,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE) 
+  m$k <- k
+  m
+}, export = ls()) 
+
+# Compare coherence for the five English models
+coherence_mat_en <- data.frame(k = sapply(model_list, function(x) nrow(x$phi)), 
+                            coherence = sapply(model_list, function(x) mean(x$coherence)),
+                            stringsAsFactors = FALSE)
+plot(coherence_mat_en, type = "o")
+
+# Arabic (repeat process, without sample - corpus small enough)
+# Create Arabic corpus
+chinatweets_ar_corp <- corpus(chinatweets_ar, text_field = "tweet_text")
+
+# Create DFM (remove stopwords+, numbers, punctuation, and separators)
+to_remove_ar <- c(stopwords(language = "ar", source = "misc"), LETTERS, letters, "t.co", "http", "https", "rt", "p", "amp", "via")
+chinatweets_ar_dfm <- dfm(chinatweets_ar_corp, remove = to_remove_ar, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_ar_dfm <- dfm_trim(chinatweets_ar_dfm, min_termfreq = 3, min_docfreq = 3) # Set min term and doc frequency
+chinatweets_ar_dfm <- dfm_subset(chinatweets_ar_dfm, ntoken(chinatweets_ar_dfm) > 0) # Keep only tweets with features
+chinatweets_ar_mat <- as(chinatweets_ar_dfm, "dgCMatrix")
+
+# Create five models to compare
+set.seed(123)
+model_list <- TmParallelApply(X = k_list, FUN = function(k){
+  m <- FitLdaModel(dtm = chinatweets_ar_mat,
+                   k = k,
+                   iterations = 200,
+                   burnin = 50,
+                   calc_coherence = TRUE,
+                   calc_r2 = TRUE,
+                   cpus = 4) 
+  m$k <- k
+  m
+}, export = ls()) 
+
+# Compare coherence of the five Arabic models
+coherence_mat_ar <- data.frame(k = sapply(model_list, function(x) nrow(x$phi)), 
+                            coherence = sapply(model_list, function(x) mean(x$coherence)),
+                            stringsAsFactors = FALSE)
+plot(coherence_mat_ar, type = "o")
+
+# Japanese (repeat from above)
+# Create Japanese corpus
+chinatweets_ja_corp <- corpus(chinatweets_ar, text_field = "tweet_text")
+
+# Create DFM (remove stopwords+, numbers, punctuation, and separators)
+to_remove_ja <- c(stopwords(language = "zh", source = "misc"), LETTERS, letters, "t.co", "http", "https", "rt", "p", "amp", "via")
+chinatweets_ja_dfm <- dfm(chinatweets_ja_corp, remove = to_remove_ja, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_ja_dfm <- dfm_subset(chinatweets_ja_dfm, ntoken(chinatweets_ja_dfm) > 0) # Keep only tweets with features
+chinatweets_ja_dfm <- dfm_trim(chinatweets_ja_dfm, min_termfreq = 2) # Set min term and doc frequency
+chinatweets_ja_dfm <- dfm_subset(chinatweets_ja_dfm, ntoken(chinatweets_ja_dfm) > 0) # Keep only tweets with features
+chinatweets_ja_dfm <- as(chinatweets_ja_dfm, "dgCMatrix") # Convert to dgCMatrix
+
+# Create five Japanese models
+set.seed(123)
+model_list <- TmParallelApply(X = k_list, FUN = function(k){
+  m <- FitLdaModel(dtm = chinatweets_ja_dfm,
+                   k = k,
+                   iterations = 200,
+                   burnin = 50,
+                   calc_coherence = TRUE,
+                   calc_r2 = TRUE,
+                   cpus = 4) 
+  m$k <- k
+  m
+}, export = ls()) 
+
+# Compare coherence of the five Japanese models
+coherence_mat_ja <- data.frame(k = sapply(model_list, function(x) nrow(x$phi)), 
+                            coherence = sapply(model_list, function(x) mean(x$coherence)),
+                            stringsAsFactors = FALSE)
+plot(coherence_mat_ja, type = "o")
+```
+
+## Topic Modeling (Chinese Corpus)
+
+```{r}
+# Create full Chinese language corpus
+chinatweets_zh_corp <- corpus(chinatweets_zh, text_field = "tweet_text")
+
+# Create full Chinese language DFM 
+to_remove_zh <- c(stopwords("zh", source = "misc"), "t.co", "http", "https",
+                  "rt", "p", "amp", "via", "=", "+", "一个", "日", "月", " ")
+chinatweets_zh_dfm <- dfm(chinatweets_zh_corp, remove = to_remove_zh, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_zh_dfm <- dfm_trim(chinatweets_zh_dfm, min_termfreq = 3, min_docfreq = 5) # Set min term and doc frequency
+chinatweets_zh_dfm <- dfm_subset(chinatweets_zh_dfm, ntoken(chinatweets_zh_dfm) > 0) # Keep only tweets with features
+topfeatures(chinatweets_zh_dfm, 20) # Examine top features (confirm they're meaningful)
+chinatweets_zh_matrix <- as(chinatweets_zh_dfm, "dgCMatrix") # Convert to dgCMatrix
+
+# Create model
+set.seed(123)
+chinatweets_zh_lda_model <- FitLdaModel(dtm = chinatweets_zh_matrix, 
+                     k = 10,
+                     iterations = 300,
+                     burnin = 100,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE,
+                     cpus = 4)
+
+# Extract top terms for each topic
+zh_topic_terms <- GetTopTerms(phi = chinatweets_zh_lda_model$phi, M = 10)
+
+# Extract coherence score for each topic
+zh_topic_coherence <- data.frame(chinatweets_zh_lda_model$coherence*100)
+
+# Translate topic terms to English
+topic1_zh <- zh_topic_terms[, 1]
+topic2_zh <- zh_topic_terms[, 2]
+topic3_zh <- zh_topic_terms[, 3]
+topic4_zh <- zh_topic_terms[, 4]
+topic5_zh <- zh_topic_terms[, 5]
+topic6_zh <- zh_topic_terms[, 6]
+topic7_zh <- zh_topic_terms[, 7]
+topic8_zh <- zh_topic_terms[, 8]
+topic9_zh <- zh_topic_terms[, 9]
+topic10_zh <- zh_topic_terms[, 10]
+my_key <- "AIzaSyA8ARVuLMEZe4tiIOPzZFvAkE1F49tWu5I"
+topic1_en <- translate(content.vec = topic1_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic2_en <- translate(content.vec = topic2_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic3_en <- translate(content.vec = topic3_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic4_en <- translate(content.vec = topic4_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic5_en <- translate(content.vec = topic5_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic6_en <- translate(content.vec = topic6_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic7_en <- translate(content.vec = topic7_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic8_en <- translate(content.vec = topic8_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic9_en <- translate(content.vec = topic9_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+topic10_en <- translate(content.vec = topic10_zh, google.api.key = my_key,
+          source.lang = "zh-CN", target.lang = "en")
+
+# Create dataframes to export
+zh_topic_terms_en <- data.frame(topic1_en, topic2_en, topic3_en, topic4_en, topic5_en, topic6_en, topic7_en, topic8_en, topic9_en, topic10_en)
+zh_topic_terms <- as.data.frame(zh_topic_terms)
+
+# Export
+write.csv(zh_topic_terms_en, file = "zh_topic_terms_en.csv", row.names = FALSE)
+write.csv(zh_topic_terms, file = "zh_topic_terms.csv", row.names = FALSE)
+write.csv(zh_topic_coherence, file = "zh_topic_coherence.csv", row.names = FALSE)
+
+```
+
+## Sentiment Analysis and Visualizations (Chinese Corpus)
+
+```{r}
+# Create Chinese versions of English dictionaries
+# Positive dictionary --> Chinese
+pos_sent_en <- data_dictionary_geninqposneg[[1]]
+pos_sent_en <- data.frame(pos_sent_en, stringsAsFactors = FALSE)
+pos_sent_zh <- translate(dataset = pos_sent_en, content.field = "pos_sent_en",
+                         google.api.key = my_key,
+                         source.lang = "en", target.lang = "zh-TW")
+pos_sent_zh1 <- translate(dataset = pos_sent_en, content.field = "pos_sent_en",
+                         google.api.key = my_key,
+                         source.lang = "en", target.lang = "zh-CN") # simplified
+pos_sent_zh_words <- c(pos_sent_zh$translatedContent, pos_sent_zh1$translatedContent)
+
+# Negative dictionary --> Chinese
+neg_sent_en <- data_dictionary_geninqposneg[[2]]
+neg_sent_en <- data.frame(neg_sent_en, stringsAsFactors = FALSE)
+neg_sent_zh <- translate(dataset = neg_sent_en,
+                         content.field = "neg_sent_en", 
+                         google.api.key = my_key,
+                         source.lang = "en", 
+                         target.lang = "zh-TW")
+neg_sent_zh1 <- translate(dataset = neg_sent_en,
+                         content.field = "neg_sent_en", 
+                         google.api.key = my_key,
+                         source.lang = "en", 
+                         target.lang = "zh-CN")
+neg_sent_zh_words <- c(neg_sent_zh$translatedContent, neg_sent_zh1$translatedContent)
+
+# Combine to create pos-neg Chinese dictionary
+pos_neg_dict_zh <- dictionary(x = list(positive = pos_sent_zh_words, negative = neg_sent_zh_words))
+
+# Run Chinese dictionary on Chinese DFM
+chinatweets_zh_dfm_sent <- dfm(x = chinatweets_zh_dfm, dictionary = pos_neg_dict_zh)
+
+# Create sentiment score vector
+sent_score_zh <- as.numeric(chinatweets_zh_dfm_sent[, "positive"]) - as.numeric(chinatweets_zh_dfm_sent[, "negative"])
+
+# Get lead topic for each tweet
+topics_zh <- apply(chinatweets_zh_lda_model$theta, 1,
+                   function(x) names(x)[which.max(x)][1])
+
+# Combine with sentiment score
+topics_zh <- data.frame(document = names(topics_zh), 
+                        top_topic = topics_zh,
+                        sent_score_zh,
+                        stringsAsFactors = FALSE)
+
+# Produce average sentiment for each topic
+sent_score_zh_avg <- aggregate(sent_score_zh ~ top_topic,
+                               data = topics_zh,
+                               FUN = mean) * 100
+# Export
+write.csv(sent_score_zh_avg, file = "zh_topic_sentiment.csv", row.names = FALSE)
+
+# Plot topic density for reference
+topics_zh$tweet_time <- docvars(chinatweets_zh_dfm)$tweet_time
+colnames(topics_zh)[2] <- "Topic"
+topics_zh$Topic <- gsub("t_", "", topics_zh$Topic)
+topics_zh$Topic <- factor(topics_zh$Topic, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"))
+ggplot(topics_zh, aes(x = tweet_time, color = Topic)) +
+  geom_density() +
+  labs(x = "Time", y = "Density") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+```
+
+
+## Topic Modeling (English Corpus)
+
+```{r}
+# Create English corpus
+chinatweets_en_corp <- corpus(chinatweets_en, text_field = "tweet_text")
+
+# Create DFM (remove stopwords+, numbers, punctuation, and separators)
+to_remove_en <- c(stopwords("english"), stopwords("zh", source = "misc"), LETTERS, letters, "t.co", "http", "https", "rt", "p", "amp", "via", "=", "+", "�", "|", "rts", "~", "$", " ")
+chinatweets_en_dfm <- dfm(chinatweets_en_corp, remove = to_remove_en, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_en_dfm <- dfm_trim(chinatweets_en_dfm, min_termfreq = 3, min_docfreq = 5) # Set min term and doc frequency
+chinatweets_en_dfm <- dfm_subset(chinatweets_en_dfm, ntoken(chinatweets_en_dfm) > 0) # Keep only tweets with features
+topfeatures(chinatweets_en_dfm, 20) # Examine top features (confirm they're meaningful)
+chinatweets_en_matrix <- as(chinatweets_en_dfm, "dgCMatrix") # Convert to dgCMatrix
+
+# Create English topic model
+set.seed(123)
+chinatweets_en_lda_model <- FitLdaModel(dtm = chinatweets_en_matrix, 
+                     k = 20,
+                     iterations = 300,
+                     burnin = 100,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE,
+                     cpus = 4)
+
+# Extract top terms for each topic
+en_topic_terms <- GetTopTerms(phi = chinatweets_en_lda_model$phi, M = 10)
+en_topic_terms <- as.data.frame(en_topic_terms)
+
+# Extract coherence score for each topic
+en_topic_coherence <- data.frame(chinatweets_en_lda_model$coherence * 100)
+
+# Export
+write.csv(en_topic_terms, file = "en_topic_terms.csv", row.names = FALSE)
+write.csv(en_topic_coherence, file = "en_topic_coherence.csv", row.names = FALSE)
+```
+
+
+## Sentiment Analysis and Visualizations (English Corpus)
+
+```{r}
+# Create custom dictionary (English, Chinese, Emojis)
+pos_emoji <- c("\U0001f600", "\U0001f603", "\U0001f604", "\U0001f601",
+               "\U0001f642", "\U0001f60a", "\U0001f970", "\U0001f60d",
+               "\U0001f929", "\U0001f618", "\U0001f617", "\U000263a",
+               "\U0001f61A", "\U0001f619", "\U0001f917", "\U0001f973",
+               "\U0001f60e", "\U0001f923", "\U0001f602", "\U0001f607",
+               "\U0001f609", "\U0001f63a", "\U0001f638", "\U0001f639",
+               "\U0001f63b", "\U0001f63d", "\U0001f48b", "\U0001f38c",
+               "\U0001f498", "\U0001f49d", "\U0001f496", "\U0001f497",
+               "\U0001f493", "\U0001f49e", "\U0001f495", "\U0001f49f",
+               "\U0002763", "\U0001f494", "\U0002764", "\U0001f9e1",
+               "\U0001f49b", "\U0001f49a", "\U0001f49c", "\U0001f5a4",
+               "\U0001f44c", "\U000270c", "\U0001f91f", "\U0001f44d",
+               "\U0001f44f", "\U0001f64c", "\U0001f450", "\U0001f91d",
+               "\U0001f64f", "\U0002b50", "\U0001f31f", "\U0002600",
+               "\U0001f31d", "\U0001f31e", "\U0001f31a", "\U0001f308",
+               "\U00026a1", "\U0002728", "\U0001f388", "\U0001f389",
+               "\U0001f38a", "\U0001f396", "\U0001f3c6", "\U0001f3c5",
+               "\U0001f947", "\U0001f948", "\U0001f949", "\U0001f48e",
+               "\U0001f2705", "\U0001f2611", "\U0001f2714", "\U0001f3f3")
+               
+neg_emoji <- c("\U0001f928", "\U0001f610", "\U0001f611", "\U0001f636",
+               "\U0001f612", "\U0001f644", "\U0001f62c", "\U0001f925",
+               "\U0001f637", "\U0001f912", "\U0001f915", "\U0001f922",
+               "\U0001f92e", "\U0001f927", "\U0001f975", "\U0001f976",
+               "\U0001f615", "\U0001f61f", "\U0001f641", "\U0002639",
+               "\U0001f633", "\U0001f97a", "\U0001f626", "\U0001f627",
+               "\U0001f628", "\U0001f630", "\U0001f625", "\U0001f622",
+               "\U0001f62d", "\U0001f631", "\U0001f616", "\U0001f623",
+               "\U0001f61e", "\U0001f613", "\U0001f629", "\U0001f62b",
+               "\U0001f624", "\U0001f621", "\U0001f620", "\U0001f92c",
+               "\U0001f608", "\U0001f47f", "\U0001f480", "\U0002620",
+               "\U0001f479", "\U0001f47a", "\U0001f63f", "\U0001f63e",
+               "\U0001f4a2", "\U0001f4a5", "\U0001f4a3", "\U0001f44e",
+               "\U0001f6d1", "\U0001f6a8", "\U0001f525", "\U0001f9e8",
+               "\U0001f52b", "\U0001f5e1", "\U00026b0", "\U00026b1",
+               "\U00026a0", "\U00026d4", "\U0001f6ab", "\U0002622",
+               "\U0002623", "\U00023f9", "\U0002716", "\U000274c",
+               "\U000274e", "\U0001f198", "\U0001f3f4", "\U0001f595",
+               "\U000f40d")
+
+pos_sent_en_words <- c(pos_sent_zh_words, pos_sent_en$pos_sent_en, pos_emoji)
+neg_sent_en_words <- c(neg_sent_zh_words, neg_sent_en$neg_sent_en, neg_emoji)
+
+pos_neg_dict_en <- dictionary(x = list(positive = pos_sent_en_words, negative = neg_sent_en_words))
+
+# Determine sentiment scores
+chinatweets_en_dfm_sent <- dfm(x = chinatweets_en_dfm, dictionary = pos_neg_dict_en)
+
+# Create sentiment score vector
+sent_score_en1 <- as.numeric(chinatweets_en_dfm_sent[, "positive"]) - as.numeric(chinatweets_en_dfm_sent[, "negative"])
+
+# Get lead topic for each tweet
+topics_en <- apply(chinatweets_en_lda_model$theta, 1,
+                   function(x) names(x)[which.max(x)][1])
+
+# Combine with sentiment score
+topics_en <- data.frame(document = names(topics_en), 
+                        top_topic = topics_en,
+                        sent_score_en,
+                        stringsAsFactors = FALSE)
+
+# Produce average sentiment for each topic
+sent_score_en_avg <- aggregate(sent_score_en ~ top_topic,
+                               data = topics_en,
+                               FUN = mean)
+sent_score_en_avg$sent_score_en <- sent_score_en_avg$sent_score_en * 100
+
+# Export
+write.csv(sent_score_en_avg, file = "en_topic_sentiment.csv", row.names = FALSE)
+
+# Plot topic density for reference
+topics_en$tweet_time <- docvars(chinatweets_en_dfm)$tweet_time
+colnames(topics_en)[2] <- "Topic"
+topics_en$Topic <- gsub("t_", "", topics_en$Topic)
+topics_en$Topic <- factor(topics_en$Topic, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20"))
+topics_en_select <- filter(topics_en, Topic == "3" | Topic == "8" | Topic == "13" | Topic == "15" | Topic == "17")
+topics_en_select$tweet_time <- as.Date(topics_en_select$tweet_time)
+ggplot(topics_en_select, aes(x = tweet_time, color = Topic)) +
+  geom_density() +
+  labs(x = "Time", y = "Density") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+```
+
+## Topic Modeling (Arabic Corpus)
+
+```{r}
+# Create Arabic corpus
+chinatweets_ar_corp <- corpus(chinatweets_ar, text_field = "tweet_text")
+
+# Create DFM (remove stopwords+, numbers, punctuation, and separators)
+to_remove_ar <- c(stopwords(language = "ar", source = "misc"), LETTERS, letters, "t.co", "http", "https", "rt", "p", "amp", "via", "=", "+", "�", "|", "rts", "~", "$", " ")
+chinatweets_ar_dfm <- dfm(chinatweets_ar_corp, remove = to_remove_ar, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_ar_dfm <- dfm_trim(chinatweets_ar_dfm, min_termfreq = 5, min_docfreq = 5) # Set min term and doc frequency
+chinatweets_ar_dfm <- dfm_subset(chinatweets_ar_dfm, ntoken(chinatweets_ar_dfm) > 0) # Keep only tweets with features
+chinatweets_ar_matrix <- as(chinatweets_ar_dfm, "dgCMatrix") # Convert to dgCMatrix
+
+# Create Arabic topic model
+set.seed(123)
+chinatweets_ar_lda_model <- FitLdaModel(dtm = chinatweets_ar_matrix, 
+                     k = 10,
+                     iterations = 300,
+                     burnin = 100,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE,
+                     cpus = 4)
+
+# Extract top terms for each topic
+ar_topic_terms <- GetTopTerms(phi = chinatweets_ar_lda_model$phi, M = 10)
+
+# Extract coherence score for each topic
+ar_topic_coherence <- data.frame(chinatweets_ar_lda_model$coherence * 100)
+
+# Translate topic terms to English
+topic1_ar <- ar_topic_terms[, 1]
+topic2_ar <- ar_topic_terms[, 2]
+topic3_ar <- ar_topic_terms[, 3]
+topic4_ar <- ar_topic_terms[, 4]
+topic5_ar <- ar_topic_terms[, 5]
+topic6_ar <- ar_topic_terms[, 6]
+topic7_ar <- ar_topic_terms[, 7]
+topic8_ar <- ar_topic_terms[, 8]
+topic9_ar <- ar_topic_terms[, 9]
+topic10_ar <- ar_topic_terms[, 10]
+topic1_en <- translate(content.vec = topic1_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic2_en <- translate(content.vec = topic2_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic3_en <- translate(content.vec = topic3_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic4_en <- translate(content.vec = topic4_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic5_en <- translate(content.vec = topic5_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic6_en <- translate(content.vec = topic6_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic7_en <- translate(content.vec = topic7_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic8_en <- translate(content.vec = topic8_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic9_en <- translate(content.vec = topic9_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+topic10_en <- translate(content.vec = topic10_ar, google.api.key = my_key,
+          source.lang = "ar", target.lang = "en")
+
+# Create dataframes to export
+ar_topic_terms_en <- data.frame(topic1_en, topic2_en, topic3_en, topic4_en, topic5_en, topic6_en, topic7_en, topic8_en, topic9_en, topic10_en)
+ar_topic_terms <- as.data.frame(ar_topic_terms)
+
+# Export
+write.csv(ar_topic_terms_en, file = "ar_topic_terms_en.csv", row.names = FALSE)
+write.csv(ar_topic_terms, file = "ar_topic_terms.csv", row.names = FALSE)
+write.csv(ar_topic_coherence, file = "ar_topic_coherence.csv", row.names = FALSE)
+```
+
+
+## Arabic Sentiment Analysis and Visualizations
+
+```{r}
+# Create Arabic versions of English dictionaries
+# Positive dictionary --> Arabic
+pos_sent_en <- data_dictionary_geninqposneg[[1]]
+pos_sent_en <- data.frame(pos_sent_en, stringsAsFactors = FALSE)
+pos_sent_ar <- translate(dataset = pos_sent_en, 
+                         content.field = "pos_sent_en",
+                         google.api.key = my_key,
+                         source.lang = "en",
+                         target.lang = "ar")
+pos_sent_ar <- pos_sent_ar$translatedContent
+
+# Negative dictionary --> Arabic
+neg_sent_en <- data_dictionary_geninqposneg[[2]]
+neg_sent_en <- data.frame(neg_sent_en, stringsAsFactors = FALSE)
+neg_sent_ar <- translate(dataset = neg_sent_en,
+                         content.field = "neg_sent_en",
+                         google.api.key = my_key,
+                         source.lang = "en",
+                         target.lang = "ar")
+neg_sent_ar <- neg_sent_ar$translatedContent
+
+# Combine to create pos-neg Arabic dictionary (Arabic + Emojis)
+pos_neg_dict_ar <- dictionary(x = list(positive = c(pos_sent_ar, pos_emoji), negative = c(neg_sent_ar, neg_emoji)))
+
+# Run Chinese dictionary on Chinese DFM
+chinatweets_ar_dfm_sent <- dfm(x = chinatweets_ar_dfm, dictionary = pos_neg_dict_ar)
+
+# Craete sentiment score vector
+sent_score_ar <- as.numeric(chinatweets_ar_dfm_sent[, "positive"]) - as.numeric(chinatweets_ar_dfm_sent[, "negative"])
+
+# Get lead topic for each tweet
+topics_ar <- apply(chinatweets_ar_lda_model$theta, 1,
+                   function(x) names(x)[which.max(x)][1])
+
+# Combine with sentiment score
+topics_ar <- data.frame(document = names(topics_ar), 
+                        top_topic = topics_ar,
+                        sent_score_ar,
+                        stringsAsFactors = FALSE)
+
+# Produce average sentiment for each topic
+sent_score_ar_avg <- aggregate(sent_score_ar ~ top_topic,
+                               data = topics_ar,
+                               FUN = mean)
+sent_score_ar_avg$sent_score_ar <- sent_score_ar_avg$sent_score_ar * 10
+
+# Export
+write.csv(sent_score_ar_avg, file = "ar_topic_sentiment.csv", row.names = FALSE)
+
+# Plot topic density for reference
+topics_ar$tweet_time <- docvars(chinatweets_ar_dfm)$tweet_time
+colnames(topics_ar)[2] <- "Topic"
+topics_ar$Topic <- gsub("t_", "", topics_ar$Topic)
+topics_ar$Topic <- factor(topics_ar$Topic, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"))
+topics_ar$tweet_time <- as.Date(topics_ar$tweet_time)
+ggplot(topics_ar, aes(x = tweet_time, color = Topic)) +
+  geom_density() +
+  labs(x = "Time", y = "Density") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+```
+
+## Topic Modeling (Japanese Corpus)
+
+```{r}
+# Create Japanese corpus
+chinatweets_ja_corp <- corpus(chinatweets_ja, text_field = "tweet_text")
+
+# Import Japanese stopwords (source: https://github.com/stopwords-iso/stopwords-ja)
+ja_stopwords <- read_csv("japanese_stopwords.csv", na = character())
+ja_stopwords <- ja_stopwords$stopwords
+
+# Create DFM (remove stopwords+, numbers, punctuation, and separators)
+to_remove_ja <- c(to_remove_zh, ja_stopwords)
+chinatweets_ja_dfm <- dfm(chinatweets_ja_corp, remove = to_remove_ja, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_ja_dfm <- dfm_trim(chinatweets_ja_dfm, min_termfreq = 3) # Set min term frequency
+chinatweets_ja_dfm <- dfm_subset(chinatweets_ja_dfm, ntoken(chinatweets_ja_dfm) > 0) # Keep only tweets with features
+chinatweets_ja_matrix <- as(chinatweets_ja_dfm, "dgCMatrix") # Convert to dgCMatrix
+
+# Create Japanese topic model
+set.seed(123)
+chinatweets_ja_lda_model <- FitLdaModel(dtm = chinatweets_ja_matrix, 
+                     k = 10,
+                     iterations = 300,
+                     burnin = 100,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE,
+                     cpus = 4)
+
+# Extract top terms for each topic
+ja_topic_terms <- GetTopTerms(phi = chinatweets_ja_lda_model$phi, M = 10)
+
+# Extract coherence score for each topic
+ja_topic_coherence <- data.frame(chinatweets_ja_lda_model$coherence * 100)
+
+# Translate topic terms to English
+topic1_ja <- ja_topic_terms[, 1]
+topic2_ja <- ja_topic_terms[, 2]
+topic3_ja <- ja_topic_terms[, 3]
+topic4_ja <- ja_topic_terms[, 4]
+topic5_ja <- ja_topic_terms[, 5]
+topic6_ja <- ja_topic_terms[, 6]
+topic7_ja <- ja_topic_terms[, 7]
+topic8_ja <- ja_topic_terms[, 8]
+topic9_ja <- ja_topic_terms[, 9]
+topic10_ja <- ja_topic_terms[, 10]
+topic1_en <- translate(content.vec = topic1_ja, google.api.key = my_key,
+          source.lang = "zh-TW", target.lang = "en")
+topic2_en <- translate(content.vec = topic2_ja, google.api.key = my_key,
+          source.lang = "zh_CN", target.lang = "en")
+topic3_en <- translate(content.vec = topic3_ja, google.api.key = my_key,
+          source.lang = "zh-TW", target.lang = "en")
+topic4_en <- translate(content.vec = topic4_ja, google.api.key = my_key,
+          source.lang = "ja", target.lang = "en")
+topic5_en <- translate(content.vec = topic5_ja, google.api.key = my_key,
+          source.lang = "zh-TW", target.lang = "en")
+topic6_en <- translate(content.vec = topic6_ja, google.api.key = my_key,
+          source.lang = "zh-TW", target.lang = "en")
+topic7_en <- translate(content.vec = topic7_ja, google.api.key = my_key,
+          source.lang = "ja", target.lang = "en")
+topic8_en <- translate(content.vec = topic8_ja, google.api.key = my_key,
+          source.lang = "zh-TW", target.lang = "en")
+topic9_en <- translate(content.vec = topic9_ja, google.api.key = my_key,
+          source.lang = "zh-TW", target.lang = "en")
+topic10_en <- translate(content.vec = topic10_ja, google.api.key = my_key,
+          source.lang = "zh-TW", target.lang = "en")
+
+# Create dataframes to export
+ja_topic_terms_en <- data.frame(topic1_en, topic2_en, topic3_en, topic4_en, topic5_en, topic6_en, topic7_en, topic8_en, topic9_en, topic10_en)
+ja_topic_terms <- as.data.frame(ja_topic_terms)
+
+# Export
+write.csv(ja_topic_terms_en, file = "ja_topic_terms_en.csv", row.names = FALSE)
+write.csv(ja_topic_terms, file = "ja_topic_terms.csv", row.names = FALSE)
+write.csv(ja_topic_coherence, file = "ja_topic_coherence.csv", row.names = FALSE)
+```
+
+## Sentiment Analaysis (Japanese Corpus)
+
+```{r}
+# Create Japanese versions of English dictionaries
+# Positive dictionary --> Japanese
+pos_sent_en <- data_dictionary_geninqposneg[[1]]
+pos_sent_en <- data.frame(pos_sent_en, stringsAsFactors = FALSE)
+pos_sent_ja <- translate(dataset = pos_sent_en,
+                         content.field = "pos_sent_en",
+                         google.api.key = my_key,
+                         source.lang = "en",
+                         target.lang = "ja")
+pos_sent_ja <- pos_sent_ja$translatedContent
+pos_sent_ja <- c(pos_sent_ja, pos_sent_zh_words)
+
+# Negative dictionary --> Japanese
+neg_sent_en <- data_dictionary_geninqposneg[[2]]
+neg_sent_en <- data.frame(neg_sent_en, stringsAsFactors = FALSE)
+neg_sent_ja <- translate(dataset = neg_sent_en,
+                         content.field = "neg_sent_en",
+                         google.api.key = my_key,
+                         source.lang = "en",
+                         target.lang = "ja")
+neg_sent_ja <- neg_sent_ja$translatedContent
+neg_sent_ja <- c(neg_sent_ja, neg_sent_zh_words)
+
+# Combine to create pos-neg Arabic dictionary (Arabic + Emojis)
+pos_neg_dict_ja <- dictionary(x = list(positive = pos_sent_ja, negative = neg_sent_ja))
+
+# Run Chinese dictionary on Chinese DFM
+chinatweets_ja_dfm_sent <- dfm(x = chinatweets_ja_dfm, dictionary = pos_neg_dict_ja)
+
+# Create sentiment score vector
+sent_score_ja <- as.numeric(chinatweets_ja_dfm_sent[, "positive"]) - as.numeric(chinatweets_ja_dfm_sent[, "negative"])
+
+# Get lead topic for each tweet
+topics_ja <- apply(chinatweets_ja_lda_model$theta, 1,
+                   function(x) names(x)[which.max(x)][1])
+
+# Combine with sentiment score
+topics_ja <- data.frame(document = names(topics_ja), 
+                        top_topic = topics_ja,
+                        sent_score_ja,
+                        stringsAsFactors = FALSE)
+
+# Produce average sentiment for each topic
+sent_score_ja_avg <- aggregate(sent_score_ja ~ top_topic,
+                               data = topics_ja,
+                               FUN = mean)
+sent_score_ja_avg$sent_score_ja <- sent_score_ja_avg$sent_score_ja * 100
+
+# Export
+write.csv(sent_score_ja_avg, file = "ja_topic_sentiment.csv", row.names = FALSE)
+
+# Plot topic density for reference
+topics_ja$tweet_time <- docvars(chinatweets_ja_dfm)$tweet_time
+colnames(topics_ja)[2] <- "Topic"
+topics_ja$Topic <- gsub("t_", "", topics_ja$Topic)
+topics_ja$Topic <- factor(topics_ja$Topic, levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"))
+topics_ja$tweet_time <- as.Date(topics_ja$tweet_time)
+ggplot(topics_ja, aes(x = tweet_time, color = Topic)) +
+  geom_density() +
+  labs(x = "Time", y = "Density") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+```
+
+## Explore Japanese Corpus Topics 4 and 7
+
+```{r}
+# Assign topics to DFM
+docvars(chinatweets_ja_dfm)$topic <- topics_ja$Topic
+
+# Subset DFM to only topics 4 and 7
+chinatweets_ja_dfm_ja <- dfm_subset(chinatweets_ja_dfm, topic == "4" | topic == "7")
+chinatweets_ja_matrix1 <- as(chinatweets_ja_dfm_ja, "dgCMatrix") # Convert to dgCMatrix
+
+# Run Japanese LDA model on subset
+set.seed(123)
+chinatweets_ja_lda_model1 <- FitLdaModel(dtm = chinatweets_ja_matrix1, 
+                     k = 5,
+                     iterations = 300,
+                     burnin = 100,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE,
+                     cpus = 4)
+
+# Extract top terms for each topic
+ja_topic_terms1 <- GetTopTerms(phi = chinatweets_ja_lda_model1$phi, M = 10)
+ja_topic_terms1 <- as.data.frame(ja_topic_terms1)
+
+# Extract coherence score for each topic
+ja_topic_coherence1 <- data.frame(chinatweets_ja_lda_model1$coherence * 100)
+
+# Extract leading topic
+topics_ja1 <- apply(chinatweets_ja_lda_model1$theta, 1,
+                   function(x) names(x)[which.max(x)][1])
+
+# Assign sentiment scores
+chinatweets_ja_dfm_sent1 <- dfm(x = chinatweets_ja_dfm_ja, dictionary = pos_neg_dict_ja)
+
+# Create sentiment score vector
+sent_score_ja1 <- as.numeric(chinatweets_ja_dfm_sent1[, "positive"]) - as.numeric(chinatweets_ja_dfm_sent1[, "negative"])
+
+# Combine with sentiment score
+topics_ja1 <- data.frame(document = names(topics_ja1), 
+                        top_topic = topics_ja1,
+                        sent_score_ja1,
+                        stringsAsFactors = FALSE)
+
+# Produce average sentiment for each topic
+sent_score_ja_avg1 <- aggregate(sent_score_ja1 ~ top_topic,
+                               data = topics_ja1,
+                               FUN = mean)
+sent_score_ja_avg1$sent_score_ja1 <- sent_score_ja_avg1$sent_score_ja1 * 100
+
+# Export
+write.csv(sent_score_ja_avg1, file = "ja_topic_sentiment1.csv", row.names = FALSE)
+write.csv(ja_topic_terms1, file = "ja_topic_terms1.csv", row.names = FALSE)
+write.csv(ja_topic_coherence1, file = "ja_topic_coherence1.csv", row.names = FALSE)
+```
+
+## Explore Key Subject Actors
+
+```{r}
+# Create One Corpus with Chinese, English, and Japanese Labeled Tweets (omit Arabic)
+chinatweets <- filter(chinatweets, Language == "zh" | Language == "en" | Language == "ja")
+chinatweets_corp <- corpus(chinatweets, text_field = "tweet_text")
+
+# Create DFM for Analysis
+to_remove <- c(stopwords("zh", source = "misc"), stopwords("english"), ja_stopwords, LETTERS, letters, "t.co", "http", "https", "rt", "p", "amp", "via", "=", "+", "一个", "日", "月", " ", "�", "|", "rts", "~", "$")
+chinatweets_dfm <- dfm(chinatweets_corp, remove = to_remove, remove_numbers = TRUE, remove_punct = TRUE, remove_separators = TRUE, stem = FALSE)
+chinatweets_dfm <- dfm_trim(chinatweets_dfm, min_termfreq = 3) # Set min term frequency
+
+# Create Sentiment Score for Each Tweet
+combined_pos = c(pos_sent_zh_words, pos_sent_en$pos_sent_en, pos_sent_ja)
+combined_neg = c(neg_sent_zh_words, neg_sent_en$neg_sent_en, neg_sent_ja)  
+combined_dict <- dictionary(x = list(positive = combined_pos, negative = combined_neg))
+chinatweets_dfm_sent <- dfm(x = chinatweets_dfm, dictionary = combined_dict)
+sent_score <- as.numeric(chinatweets_dfm_sent[, "positive"]) - as.numeric(chinatweets_dfm_sent[, "negative"])
+sent_score <- as.data.frame(sent_score)
+
+# Create Vectors for Key Actors
+police_feats <- c("police", "policemen", "警方", "警察", "警")
+protester_feats <- c("thug", "thugs", "protester", "protesters", "暴徒", "抗议者")
+guowengui_feats <- c("郭", "贵", "貴", "miles", "kwok")
+china_feats <- c("china", "中国", "中國")
+usa_feats <- c("america", "united", "美国", "美國")
+hk_feats <- c("hong", "kong", "香港", "港")
+pandemic_feats <- c("病毒", "肺炎", "毒","港警", "コロナ", "ウイルス",
+                    "virus", "epidemic", "pandemic")
+trade_feats <- c("贸易", "贸易战", "战", "war", "trade")
+nba_feats <- c("basketball", "篮球", "籃球")
+
+# Create Dictionary
+topic_actor_dict <- dictionary(x = list(police = police_feats, 
+                                        protester = protester_feats, 
+                                        guowengui = guowengui_feats,
+                                        china = china_feats,
+                                        usa = usa_feats,
+                                        hk = hk_feats,
+                                        trump = trump_feats,
+                                        pandemic = pandemic_feats,
+                                        trade = trade_feats,
+                                        nba = nba_feats))
+
+# Create DFM with Actor Dictionary
+chinatweets_dfm_actors <- dfm(x = chinatweets_dfm, dictionary = topic_actor_dict)
+
+# Combine Sentiment Scores with Actor Counts in DataFrame
+sent_score$police_count <- as.numeric(chinatweets_dfm_actors[, "police"])
+sent_score$protester_count <- as.numeric(chinatweets_dfm_actors[, "protester"])
+sent_score$guowengui_count <- as.numeric(chinatweets_dfm_actors[, "guowengui"])
+sent_score$china_count <- as.numeric(chinatweets_dfm_actors[, "china"])
+sent_score$usa_count <- as.numeric(chinatweets_dfm_actors[, "usa"])
+sent_score$hk_count <- as.numeric(chinatweets_dfm_actors[, "hk"])
+sent_score$pandemic_count <- as.numeric(chinatweets_dfm_actors[, "pandemic"])
+sent_score$trade_count <- as.numeric(chinatweets_dfm_actors[, "trade"])
+
+# Calculate Average Sentiment by Actor
+police_sent <- mean(filter(sent_score, police_count > 0)$sent_score)
+protester_sent <- mean(filter(sent_score, protester_count > 0)$sent_score)
+guowengui_sent <- mean(filter(sent_score, guowengui_count > 0)$sent_score)
+china_sent <- mean(filter(sent_score, china_count > 0)$sent_score)
+usa_sent <- mean(filter(sent_score, usa_count > 0)$sent_score)
+hk_sent <- mean(filter(sent_score, hk_count > 0)$sent_score)
+pandemic_sent <- mean(filter(sent_score, pandemic_count > 0)$sent_score)
+trade_sent <- mean(filter(sent_score, trade_count > 0)$sent_score)
+
+aggregate_sums <- data.frame(c("police", "protester", "guowengui", "china", "hk", "usa", "pandemic", "trade"),
+                             c(police_sent, protester_sent, guowengui_sent, china_sent, hk_sent, usa_sent, pandemic_sent, trade_sent) * 100)
+colnames(aggregate_sums) <- c("subject", "sentiment")
+write.csv(aggregate_sums, file = "combined_sent.csv", row.names = FALSE)
+
+# Re-calcualte features plus mention of China
+aggregate_sums1 <- data.frame(c("police", "protester", "guowengui", "china", "hk", "usa", "pandemic", "trade"),
+                             c(mean(filter(sent_score, police_count > 0 & china_count > 0)$sent_score), 
+                               mean(filter(sent_score, protester_count > 0 & china_count > 0)$sent_score),
+                               mean(filter(sent_score, guowengui_count > 0 & china_count > 0)$sent_score),
+                               mean(filter(sent_score, china_count > 0)$sent_score), 
+                               mean(filter(sent_score, hk_count > 0 & china_count > 0)$sent_score), 
+                               mean(filter(sent_score, usa_count > 0 & china_count > 0)$sent_score),
+                               mean(filter(sent_score, pandemic_count > 0 & china_count > 0)$sent_score), 
+                               mean(filter(sent_score, trade_count > 0 & china_count > 0)$sent_score)) * 100)
+colnames(aggregate_sums1) <- c("subject", "sentiment")
+write.csv(aggregate_sums1, file = "combined_sent_china.csv", row.names = FALSE)
+
+# Check police score when China and Hong Kong are both mentioned
+mean(filter(sent_score, police_count > 0 & china_count > 0 & hk_count > 0)$sent_score) * 100
+
+# Check pandemic score when US is mentioned
+mean(filter(sent_score, pandemic_count > 0 & usa_count > 0)$sent_score) * 100
+
+# Check trade score when US is mentioned
+mean(filter(sent_score, trade_count > 0 & usa_count > 0)$sent_score) * 100
+
+# Check scores when mentioned with US
+aggregate_sums2 <- data.frame(c("police", "protester", "guowengui", "china", "hk", "usa", "pandemic", "trade"),
+                             c(mean(filter(sent_score, police_count > 0 & usa_count > 0)$sent_score), 
+                               mean(filter(sent_score, protester_count > 0 & usa_count > 0)$sent_score),
+                               mean(filter(sent_score, guowengui_count > 0 & usa_count > 0)$sent_score),
+                               mean(filter(sent_score, china_count > 0 & usa_count > 0)$sent_score), 
+                               mean(filter(sent_score, hk_count > 0 & usa_count > 0)$sent_score), 
+                               mean(filter(sent_score, usa_count > 0)$sent_score),
+                               mean(filter(sent_score, pandemic_count > 0 & usa_count > 0)$sent_score), 
+                               mean(filter(sent_score, trade_count > 0 & usa_count > 0)$sent_score)) * 100)
+colnames(aggregate_sums2) <- c("subject", "sentiment")
+write.csv(aggregate_sums2, file = "combined_sent_usa.csv", row.names = FALSE)
+```
+
+## Extract Random Samples of Rweets for Subjects (plus NBA)
+
+```{r}
+# Add subject count vectors to chinatweets DFM
+chinatweets$police_count <- as.numeric(chinatweets_dfm_actors[, "police"])
+chinatweets$protester_count <- as.numeric(chinatweets_dfm_actors[, "protester"])
+chinatweets$guowengui_count <- as.numeric(chinatweets_dfm_actors[, "guowengui"])
+chinatweets$china_count <- as.numeric(chinatweets_dfm_actors[, "china"])
+chinatweets$usa_count <- as.numeric(chinatweets_dfm_actors[, "usa"])
+chinatweets$hk_count <- as.numeric(chinatweets_dfm_actors[, "hk"])
+chinatweets$pandemic_count <- as.numeric(chinatweets_dfm_actors[, "pandemic"])
+chinatweets$trade_count <- as.numeric(chinatweets_dfm_actors[, "trade"])
+chinatweets$nba_count <- as.numeric(chinatweets_dfm_actors[, "nba"])
+
+# Random sample three tweets for each subject (Add NBA to confirm not political)
+police_sample <- sample(filter(chinatweets, police_count > 0)$tweet_text, size = 3)
+protester_sample <- sample(filter(chinatweets, protester_count > 0)$tweet_text, size = 3)
+guowengui_sample <- sample(filter(chinatweets, guowengui_count > 0)$tweet_text, size = 3)
+china_sample <- sample(filter(chinatweets, china_count > 0)$tweet_text, size = 3)
+usa_sample <- sample(filter(chinatweets, usa_count > 0)$tweet_text, size = 3)
+hk_sample <- sample(filter(chinatweets, hk_count > 0)$tweet_text, size = 3)
+pandemic_sample <- sample(filter(chinatweets, pandemic_count > 0)$tweet_text, size = 3)
+trade_sample <- sample(filter(chinatweets, trade_count > 0)$tweet_text, size = 3)
+nba_sample <- sample(filter(chinatweets, nba_count > 0)$tweet_text, size = 3)
+```
