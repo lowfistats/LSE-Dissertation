@@ -119,7 +119,6 @@ chinatweets_ar <- chinatweets[which(chinatweets$Language == "ar"), ]
 chinatweets_ja <- chinatweets[which(chinatweets$Language == "ja"), ]
 ```
 
-
 ## Determine K for Topic Modeling (Number of Topics for Each 'Language Corpus')
 
 ```{r}
@@ -394,7 +393,6 @@ ggplot(topics_zh, aes(x = tweet_time, color = Topic)) +
   scale_x_date(date_breaks = "1 year", date_labels = "%Y")
 ```
 
-
 ## Topic Modeling (English Corpus)
 
 ```{r}
@@ -430,7 +428,6 @@ en_topic_coherence <- data.frame(chinatweets_en_lda_model$coherence * 100)
 write.csv(en_topic_terms, file = "en_topic_terms.csv", row.names = FALSE)
 write.csv(en_topic_coherence, file = "en_topic_coherence.csv", row.names = FALSE)
 ```
-
 
 ## Sentiment Analysis and Visualizations (English Corpus)
 
@@ -621,7 +618,7 @@ pos_neg_dict_ar <- dictionary(x = list(positive = c(pos_sent_ar, pos_emoji), neg
 # Run Chinese dictionary on Chinese DFM
 chinatweets_ar_dfm_sent <- dfm(x = chinatweets_ar_dfm, dictionary = pos_neg_dict_ar)
 
-# Craete sentiment score vector
+# Create sentiment score vector
 sent_score_ar <- as.numeric(chinatweets_ar_dfm_sent[, "positive"]) - as.numeric(chinatweets_ar_dfm_sent[, "negative"])
 
 # Get lead topic for each tweet
@@ -938,12 +935,6 @@ write.csv(aggregate_sums1, file = "combined_sent_china.csv", row.names = FALSE)
 
 # Check police score when China and Hong Kong are both mentioned
 mean(filter(sent_score, police_count > 0 & china_count > 0 & hk_count > 0)$sent_score) * 100
-
-# Check pandemic score when US is mentioned
-mean(filter(sent_score, pandemic_count > 0 & usa_count > 0)$sent_score) * 100
-
-# Check trade score when US is mentioned
-mean(filter(sent_score, trade_count > 0 & usa_count > 0)$sent_score) * 100
 
 # Check scores when mentioned with US
 aggregate_sums2 <- data.frame(c("police", "protester", "guowengui", "china", "hk", "usa", "pandemic", "trade"),
